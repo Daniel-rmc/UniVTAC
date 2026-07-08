@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+unset CONDA_PREFIX
+unset CONDA_DEFAULT_ENV
+unset CONDA_PROMPT_MODIFIER
+unset VIRTUAL_ENV
+unset VIRTUAL_ENV_PROMPT
+
+exec /workspace/isaaclab/_isaac_sim/python.sh -m pip "$@"

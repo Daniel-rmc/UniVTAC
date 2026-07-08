@@ -64,6 +64,8 @@ def worker_run(task_config, task_file_name, base_save_dir: Path, seed_q: Queue,
 
     app_launcher = AppLauncher(app_args)
     simulation_app = app_launcher.app
+    from runtime_compat import enable_omni_ui
+    enable_omni_ui(simulation_app)
 
     try:
         task_module = importlib.import_module(f"envs.{task_file_name}")

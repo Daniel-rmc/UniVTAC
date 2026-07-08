@@ -69,6 +69,8 @@ args_cli.num_envs = 1
 # launch omniverse app, must done before importing anything from omni.isaac
 app_launcher = AppLauncher(args_cli)
 simulation_app = app_launcher.app
+from runtime_compat import enable_omni_ui
+enable_omni_ui(simulation_app)
 
 import traceback
 import importlib

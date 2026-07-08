@@ -88,6 +88,8 @@ if task_config.get('render_frequency', 1) == 0:
 # launch omniverse app, must done before importing anything from omni.isaac
 app_launcher = AppLauncher(args_cli)
 simulation_app = app_launcher.app
+from runtime_compat import enable_omni_ui
+enable_omni_ui(simulation_app)
 
 import importlib
 if TYPE_CHECKING:

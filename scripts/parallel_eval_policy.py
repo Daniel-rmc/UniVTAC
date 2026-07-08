@@ -67,6 +67,8 @@ def worker_run(args, deploy_config, task_config, task_file_name, policy_name,
 
     app_launcher = AppLauncher(app_args)
     simulation_app = app_launcher.app
+    from runtime_compat import enable_omni_ui
+    enable_omni_ui(simulation_app)
 
     try:
         # Dynamic imports after app launch
