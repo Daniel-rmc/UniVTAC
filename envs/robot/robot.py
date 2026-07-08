@@ -159,6 +159,15 @@ class RobotManager:
             constraint_pose=constraint_pose,
             time_dilation_factor=time_dilation_factor
         )
+        self.last_plan_debug = {
+            'target_pose': target_pose,
+            'constraint_pose': constraint_pose,
+            'pre_dis': pre_dis,
+            'time_dilation_factor': time_dilation_factor,
+            'curr_joint_pos': self.robot.data.joint_pos[0, :self.robot.num_joints-2].detach().cpu().numpy().tolist(),
+            'curr_joint_vel': self.robot.data.joint_vel[0, :self.robot.num_joints-2].detach().cpu().numpy().tolist(),
+            'result': result,
+        }
         
         if result.success.item():
             return {

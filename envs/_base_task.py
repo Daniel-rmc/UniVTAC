@@ -206,6 +206,11 @@ class BaseTask(UipcRLEnv):
 
     def __init__(self, cfg: BaseTaskCfg, mode:Literal['collect', 'eval'] = 'collect', render_mode=None, **kwargs):
         cfg = self.load_robot_and_sensors(cfg)
+        if os.environ.get("UNIVTAC_DISABLE_ENV_INIT_SEED") != "1":
+            env_seed = os.environ.get("UNIVTAC_ENV_INIT_SEED", getattr(cfg, "seed", None))
+            if env_seed is not None:
+                cfg.seed = int(env_seed)
+                print(f"BaseTask env init seed before UipcRLEnv init: {cfg.seed}")
         
         self.cfg = cfg
         self.render_outdated = True
@@ -363,11 +368,27 @@ class BaseTask(UipcRLEnv):
         trimesh.Scene(geos).show()
 
     def reset(self, seed:int=-1, instructions:list[str]|None=None, options:dict[str, Any]|None=None):
+        reset_debug_enabled = os.environ.get("UNIVTAC_RESET_DEBUG_LOG") == "1"
+        reset_debug_start = time.perf_counter()
+
+        def reset_debug(stage):
+            if reset_debug_enabled:
+                print(
+                    "UNIVTAC_RESET_DEBUG "
+                    f"stage={stage} elapsed={time.perf_counter() - reset_debug_start:.2f} "
+                    f"step_count={getattr(self, 'step_count', 'NA')} "
+                    f"plan_success={getattr(self, 'plan_success', 'NA')}"
+                )
+
+        reset_debug("before_seed")
         self.seed(seed)
+        reset_debug("after_seed")
         ret = super().reset()
+        reset_debug("after_super_reset")
         
         if self.first_frame is not None:
             self.uipc_sim.replay_frame(self.first_frame)
+            reset_debug("after_replay_first_frame")
 
         total_cost = time.perf_counter() - self.start_time
         if total_cost > self.cfg.reset_time_limit:
@@ -382,6 +403,7 @@ class BaseTask(UipcRLEnv):
         
         self.in_pre_move = True
         if self.first_frame is None:
+            reset_debug("before_first_frame_settle")
             reset_test_start = time.perf_counter()
             for _ in range(5):
                 self._step(is_save=False)
@@ -394,9 +416,12 @@ class BaseTask(UipcRLEnv):
 
             self.first_frame = self.uipc_sim.world.frame()
             self.uipc_sim.save_frame()
+            reset_debug("after_first_frame_saved")
 
         if hasattr(self, '_reset_actors'):
+            reset_debug("before_reset_actors")
             self._reset_actors()
+            reset_debug("after_reset_actors")
 
             reset_test_start = time.perf_counter()
             for _ in range(20):
@@ -408,7 +433,9 @@ class BaseTask(UipcRLEnv):
                     )
             self._update_render()
             self._actor_manager.remove_animate()
+            reset_debug("after_reset_actors_settle")
         
+        reset_debug("before_final_settle")
         reset_test_start = time.perf_counter()
         for _ in range(5):
             self._step(is_save=False)
@@ -418,8 +445,11 @@ class BaseTask(UipcRLEnv):
                     f'Timeout: reset exceed time limit of {self.cfg.reset_time_limit} s, cost {reset_test_cost} s.'
                 )
         self._update_render()
+        reset_debug("after_final_settle")
 
+        reset_debug("before_pre_move")
         self.pre_move()
+        reset_debug("after_pre_move")
         self.in_pre_move = False
 
         # update render to avoid artifacts
@@ -477,22 +507,35 @@ class BaseTask(UipcRLEnv):
         self.last_render = self.step_count
     
     def get_frame_shot(self, obs):
-        head_obs = obs['observation']['head']['rgb'].clone()
-        wrist_obs = obs['observation']['wrist']['rgb'].clone()
-        tac_size = 160
-        left_tac = torchvision.transforms.Resize((tac_size, tac_size))(
-            obs['tactile']['left_tactile']['rgb_marker'].clone().permute(2, 0, 1)).permute(1, 2, 0)
-        right_tac = torchvision.transforms.Resize((tac_size, tac_size))(
-            obs['tactile']['right_tactile']['rgb_marker'].clone().permute(2, 0, 1)).permute(1, 2, 0)
+        def resize_hwc(img, size):
+            return torchvision.transforms.Resize(size)(
+                img.clone().permute(2, 0, 1)).permute(1, 2, 0)
 
-        img = torch.zeros((320, 480*2+160, 3), dtype=head_obs.dtype)
-        img[:, :480, :] = torchvision.transforms.Resize(
-            (320, 480))(head_obs.permute(2, 0, 1)).permute(1, 2, 0)
-        img[:, 480:480*2, :] = torchvision.transforms.Resize(
-            (320, 480))(wrist_obs.permute(2, 0, 1)).permute(1, 2, 0)
-        img[:tac_size, 480*2:, :] = left_tac
-        img[tac_size:, 480*2:, :] = right_tac
-        return img
+        camera_frames = []
+        for camera_name in ("head", "wrist"):
+            camera_obs = obs.get('observation', {}).get(camera_name)
+            if camera_obs is not None and 'rgb' in camera_obs:
+                camera_frames.append(resize_hwc(camera_obs['rgb'], (320, 480)))
+
+        if camera_frames:
+            dtype = camera_frames[0].dtype
+            device = camera_frames[0].device
+        else:
+            dtype = torch.uint8
+            device = 'cpu'
+            camera_frames.append(torch.zeros((320, 480, 3), dtype=dtype, device=device))
+
+        tac_size = 160
+        tactile_obs = obs.get('tactile', {})
+        tactile_frames = []
+        for names in (("left_tactile", "left_gsmini"), ("right_tactile", "right_gsmini")):
+            sensor = next((tactile_obs[name] for name in names if name in tactile_obs), None)
+            if sensor is not None and 'rgb_marker' in sensor:
+                tactile_frames.append(resize_hwc(sensor['rgb_marker'], (tac_size, tac_size)))
+            else:
+                tactile_frames.append(torch.zeros((tac_size, tac_size, 3), dtype=dtype, device=device))
+
+        return torch.cat(camera_frames + [torch.cat(tactile_frames, dim=0)], dim=1)
 
     @staticmethod
     def _step_callback(status:dict):
@@ -536,6 +579,10 @@ class BaseTask(UipcRLEnv):
         if self.plan_success is False:
             return 
         
+        step_debug_enabled = os.environ.get("UNIVTAC_STEP_DEBUG_LOG") == "1"
+        step_debug_max = int(os.environ.get("UNIVTAC_STEP_DEBUG_MAX", "20"))
+        step_debug_total_start = time.perf_counter()
+
         self.step_count += 1
 
         is_save = is_save and (not self.in_pre_move) and (not self.mode == 'eval_test')
@@ -543,16 +590,26 @@ class BaseTask(UipcRLEnv):
         video_freq = (self.cfg.video_frequency > 0 and self.step_count % self.cfg.video_frequency == 0)
         render_freq = (self.cfg.render_frequency > 0 and self.step_count % self.cfg.render_frequency == 0)
 
+        write_start = time.perf_counter()
         self.scene.write_data_to_sim()
+        write_cost = time.perf_counter() - write_start
+
+        sim_start = time.perf_counter()
         for _ in range(self.cfg.decimation):
             self.sim.step(render=False)
+        sim_cost = time.perf_counter() - sim_start
 
+        update_cost = 0.0
         if render_freq or (self.mode == 'collect' and is_save and save_freq) or (is_save and video_freq) \
             or (self.mode == 'eval' and not self.in_pre_move):
+            update_start = time.perf_counter()
             self._update_render()
+            update_cost = time.perf_counter() - update_start
 
         obs = None
+        obs_cost = 0.0
         if self.mode == 'collect' and is_save and save_freq:
+            obs_start = time.perf_counter()
             obs = self._get_observations()
             self.save_observations(obs)
 
@@ -567,11 +624,15 @@ class BaseTask(UipcRLEnv):
                         self.plan_success = False
             if self.save_count > self.cfg.max_save_frames-1:
                 self.plan_success = False
+            obs_cost = time.perf_counter() - obs_start
  
+        video_cost = 0.0
         if is_save and video_freq:
+            video_start = time.perf_counter()
             if obs is None:
                 obs = self._get_observations()
             self.video_handler.write(self.get_frame_shot(obs))
+            video_cost = time.perf_counter() - video_start
 
         step_mean_cost = 0.0
         step_cost = time.perf_counter() - self.last_step
@@ -596,6 +657,18 @@ class BaseTask(UipcRLEnv):
             'total_cost': total_cost
         }
         self.log = self._step_callback(status_dict)
+        if step_debug_enabled and self.step_count <= step_debug_max:
+            print(
+                "UNIVTAC_STEP_DEBUG "
+                f"task={getattr(self, 'task_name', self.__class__.__module__)} "
+                f"mode={self.mode} in_pre_move={self.in_pre_move} "
+                f"step={self.step_count} is_save={is_save} "
+                f"write_data={write_cost:.6f} sim_step={sim_cost:.6f} "
+                f"update_render={update_cost:.6f} obs_save={obs_cost:.6f} "
+                f"video={video_cost:.6f} total={time.perf_counter() - step_debug_total_start:.6f} "
+                f"decimation={self.cfg.decimation} render_freq={render_freq} "
+                f"save_freq={save_freq} video_freq={video_freq}"
+            )
         print(self.log+' '*5, end='\r')
     
     def _play_once(self):
@@ -717,6 +790,36 @@ class BaseTask(UipcRLEnv):
                 )
                 if control_seq['arm']['status'] == 'Fail':
                     self.logger.error(f'Arm motion planning failed on action {idx}: {action.__str__()}')
+                    if os.environ.get("UNIVTAC_PLANNER_DEBUG_LOG") == "1":
+                        plan_debug = getattr(self._robot_manager, "last_plan_debug", {})
+                        result = plan_debug.get('result')
+                        result_summary = {}
+                        if result is not None:
+                            for key in (
+                                'success', 'status', 'valid_query', 'solve_time',
+                                'total_time', 'planning_time', 'trajopt_time',
+                                'ik_time', 'finetune_time', 'attempts',
+                            ):
+                                if hasattr(result, key):
+                                    value = getattr(result, key)
+                                    if hasattr(value, 'detach'):
+                                        value = value.detach().cpu().tolist()
+                                    elif hasattr(value, 'item'):
+                                        value = value.item()
+                                    result_summary[key] = value
+                        self.logger.error(
+                            "UNIVTAC_PLANNER_DEBUG "
+                            f"task={self.task_name} mode={self.mode} seed={getattr(self, 'seed', None)} "
+                            f"atom_id={self.atom_id} tag={self.atom_tag} action_idx={idx} "
+                            f"ee_pose={self._robot_manager.get_ee_pose()} "
+                            f"target_pose={plan_debug.get('target_pose')} "
+                            f"constraint_pose={plan_debug.get('constraint_pose')} "
+                            f"pre_dis={plan_debug.get('pre_dis')} "
+                            f"time_dilation_factor={plan_debug.get('time_dilation_factor')} "
+                            f"curr_joint_pos={plan_debug.get('curr_joint_pos')} "
+                            f"curr_joint_vel={plan_debug.get('curr_joint_vel')} "
+                            f"result_summary={result_summary}"
+                        )
                     if self.cfg.debug_vis:
                         add_visual_box(action.target_pose, 'failed_target')
                         self.delay(100)

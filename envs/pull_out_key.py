@@ -1,5 +1,6 @@
 from ._base_task import *
 import numpy as np
+import os
 
 @configclass
 class TaskCfg(BaseTaskCfg):
@@ -81,7 +82,8 @@ class Task(BaseTask):
         self.delay(20)
 
     def check_early_stop(self):
-        z_dis = np.abs(self._robot_manager.get_ee_pose()[2] - self.key.get_pose()[2])
+        ee_z = self._robot_manager.get_ee_pose()[2]
+        z_dis = np.abs(ee_z - self.key.get_pose()[2])
         slot_rel_pose = self.slot.get_pose().rebase(self.slot_init_pose)
         slot_x_rotate = np.dot(
             slot_rel_pose.to_transformation_matrix()[:3, 0], np.array([1, 0, 0]))
@@ -101,8 +103,21 @@ class Task(BaseTask):
         slot_rel_pose = self.slot.get_pose().rebase(self.slot_init_pose)
         slot_x_rotate = np.dot(
             slot_rel_pose.to_transformation_matrix()[:3, 0], np.array([1, 0, 0]))
-        z_dis = np.abs(self._robot_manager.get_ee_pose()[2] - self.key.get_pose()[2])
-        return key_pose.p[2] > target_height \
-            and np.dot(key_pose.to_transformation_matrix()[:3, 2], np.array([0, 0, 1])) > 0.965 \
-            and slot_x_rotate > 0.99 \
-            and z_dis < 0.14
+        ee_z = self._robot_manager.get_ee_pose()[2]
+        z_dis = np.abs(ee_z - self.key.get_pose()[2])
+        key_upright_dot = np.dot(key_pose.to_transformation_matrix()[:3, 2], np.array([0, 0, 1]))
+        height_ok = key_pose.p[2] > target_height
+        upright_ok = key_upright_dot > 0.965
+        slot_ok = slot_x_rotate > 0.99
+        z_ok = z_dis < 0.14
+        if os.environ.get("UNIVTAC_TASK_DEBUG_LOG") == "1":
+            gripper_qpos = self._robot_manager.get_gripper_qpos()
+            print(
+                "UNIVTAC_TASK_DEBUG pull_out_key "
+                f"key_z={float(key_pose.p[2]):.6f} target_height={target_height:.6f} height_ok={bool(height_ok)} "
+                f"ee_z={float(ee_z):.6f} gripper_qpos={float(gripper_qpos):.6f} "
+                f"key_upright_dot={float(key_upright_dot):.6f} upright_ok={bool(upright_ok)} "
+                f"slot_x_rotate={float(slot_x_rotate):.6f} slot_ok={bool(slot_ok)} "
+                f"z_dis={float(z_dis):.6f} z_ok={bool(z_ok)}"
+            )
+        return height_ok and upright_ok and slot_ok and z_ok

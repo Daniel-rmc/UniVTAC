@@ -9,6 +9,7 @@ import json
 import yaml
 import torch
 import argparse
+import os
 import traceback
 from pathlib import Path
 from typing import Literal
@@ -91,6 +92,8 @@ def eval_policy(
     start_seed, max_seed, test_total_num, instructions, instruciton_type:Literal['seen', 'unseen']='seen'
 ):
     test_num, succ_num, seed = 0, 0, start_seed
+    error_seed_num = 0
+    max_error_seeds = int(os.environ.get("UNIVTAC_MAX_ERROR_SEEDS", "-1"))
 
     seed_path = task.save_root.parent / 'seeds.json'
     seed_path.parent.mkdir(parents=True, exist_ok=True)
@@ -151,6 +154,10 @@ def eval_policy(
             succ_status = 'error'
             task.clean_cache(result=succ_status)
             test_num -= 1
+            error_seed_num += 1
+            if max_error_seeds >= 0 and error_seed_num >= max_error_seeds:
+                log(f"Stop eval after {error_seed_num} error seed(s), UNIVTAC_MAX_ERROR_SEEDS={max_error_seeds}.")
+                break
         else:
             eval_cost = time.perf_counter() - eval_start
             
@@ -224,10 +231,30 @@ def main():
     env_cfg.video_frequency = task_config.get("video_frequency", env_cfg.video_frequency)
     env_cfg.random_texture = task_config.get("random_texture", False)
 
+    camera_names = os.environ.get("UNIVTAC_CAMERA_NAMES")
+    if camera_names and hasattr(env_cfg, "cameras"):
+        requested = {name.strip() for name in camera_names.split(",") if name.strip()}
+        env_cfg.cameras = [cam for cam in env_cfg.cameras if cam.name in requested]
+        print(f"Using camera override from UNIVTAC_CAMERA_NAMES: {[cam.name for cam in env_cfg.cameras]}")
+
+    video_frequency = os.environ.get("UNIVTAC_VIDEO_FREQUENCY")
+    if video_frequency is not None:
+        env_cfg.video_frequency = int(video_frequency)
+        print(f"Using video frequency override from UNIVTAC_VIDEO_FREQUENCY: {env_cfg.video_frequency}")
+
+    reset_time_limit = os.environ.get("UNIVTAC_RESET_TIME_LIMIT")
+    if reset_time_limit is not None:
+        env_cfg.reset_time_limit = float(reset_time_limit)
+        print(f"Using reset time limit override from UNIVTAC_RESET_TIME_LIMIT: {env_cfg.reset_time_limit}")
+
     env_cfg.scene.num_envs = 1
     env_cfg.sim.device = args_cli.device if args_cli.device is not None \
         else env_cfg.sim.device
     seed = deploy_config.get("seed", 0)
+    start_seed = 1000000 * (1 + seed) if args_cli.start_seed == -1 else args_cli.start_seed
+    if os.environ.get("UNIVTAC_DISABLE_ENV_INIT_SEED") != "1":
+        env_cfg.seed = int(os.environ.get("UNIVTAC_ENV_INIT_SEED", start_seed))
+        print(f"Using env init seed: {env_cfg.seed}")
 
     init_start = time.perf_counter()
     policy:BasePolicy = policy_module.Policy(deploy_config)
@@ -237,7 +264,6 @@ def main():
     task:BaseTask = task_module.Task(env_cfg, mode='eval')
     task_init_cost = time.perf_counter() - init_start
     
-    import os
     if os.environ.get('TRAIN_CONFIG'):
         deploy_config['train_config'] = os.environ['TRAIN_CONFIG']
     
@@ -251,13 +277,16 @@ def main():
     results = eval_policy(
         task=task, policy=policy,
         expert_check=args_cli.expert_check,
-        start_seed=1000000 * (1 + seed) if args_cli.start_seed == -1 else args_cli.start_seed,
+        start_seed=start_seed,
         max_seed=args_cli.max_seed,
         test_total_num=args_cli.total_num,
         instructions=instructions,
         instruciton_type=deploy_config.get("instruction_type", "seen")
     )
-    log(f"Final Result: {results['succ_num']}/{results['test_num']}({results['succ_num']/results['test_num']*100:.2f}%) success.")
+    if results['test_num'] == 0:
+        log(f"Final Result: {results['succ_num']}/{results['test_num']}(N/A) success.")
+    else:
+        log(f"Final Result: {results['succ_num']}/{results['test_num']}({results['succ_num']/results['test_num']*100:.2f}%) success.")
     
     task.close()
     policy.close()

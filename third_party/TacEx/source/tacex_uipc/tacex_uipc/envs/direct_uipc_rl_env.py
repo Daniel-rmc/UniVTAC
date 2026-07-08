@@ -10,6 +10,7 @@ import gymnasium as gym
 import inspect
 import math
 import numpy as np
+import os
 import torch
 import weakref
 from abc import abstractmethod
@@ -59,6 +60,11 @@ class UipcRLEnv(DirectRLEnv):
         self.render_mode = render_mode
         # initialize internal variables
         self._is_closed = False
+
+        env_seed = os.environ.get("UNIVTAC_ENV_INIT_SEED")
+        if env_seed is not None and os.environ.get("UNIVTAC_DISABLE_ENV_INIT_SEED") != "1":
+            self.cfg.seed = int(env_seed)
+            print(f"TacEx UipcRLEnv env init seed override: {self.cfg.seed}")
 
         # set the seed for the environment
         if self.cfg.seed is not None:
@@ -399,7 +405,10 @@ class UipcRLEnv(DirectRLEnv):
         except ModuleNotFoundError:
             pass
         # set seed for torch and other libraries
-        return torch_utils.set_seed(seed)
+        seed_value = torch_utils.set_seed(seed)
+        final_seed = seed if seed_value is None else seed_value
+        print(f"TacEx UipcRLEnv.seed input={seed} torch_return={seed_value} final={final_seed}")
+        return final_seed
 
     def render(self, recompute: bool = False) -> np.ndarray | None:
         """Run rendering without stepping through the physics.

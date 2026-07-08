@@ -28,10 +28,15 @@ class Policy(BasePolicy):
             task_settings = json.load(f)
         assert self.task_name in task_settings, f"Task '{self.task_name}' not found in task_settings.json"
         self.camera_type = task_settings[self.task_name].get('camera_type', 'head')
+        self.camera_type = os.environ.get("UNIVTAC_ACT_CAMERA_TYPE", self.camera_type)
         print(f"Using camera type '{self.camera_type}' for task '{self.task_name}'")
 
         with open(Path(__file__).parent / f'{self.train_config_name}.yml', 'r') as f:
             train_config = yaml.load(f, Loader=yaml.FullLoader)
+        temporal_agg_override = os.environ.get("UNIVTAC_ACT_TEMPORAL_AGG")
+        if temporal_agg_override is not None:
+            train_config["temporal_agg"] = temporal_agg_override not in ("0", "false", "False", "no", "NO")
+            print(f"Using temporal_agg override from UNIVTAC_ACT_TEMPORAL_AGG: {train_config['temporal_agg']}")
         
         train_config.update({
             'task_name': f"sim-{args['task_name']}-{args['task_config']}-{self.ep_num}",
@@ -79,13 +84,39 @@ class Policy(BasePolicy):
             return img
 
         if self.camera_type == 'all':
+            raw_cam_high = observation["observation"]["head"]["rgb"]
+            raw_cam_wrist = observation["observation"]["wrist"]["rgb"]
             cam_high = camera_transform(observation["observation"]["head"]["rgb"])
             cam_wrist = camera_transform(observation["observation"]["wrist"]["rgb"])
         else:
-            cam_high = camera_transform(observation["observation"][self.camera_type]["rgb"])
+            raw_cam_high = observation["observation"][self.camera_type]["rgb"]
+            raw_cam_wrist = None
+            cam_high = camera_transform(raw_cam_high)
 
-        left_tac = tactile_transform(observation["tactile"]["left_gsmini"]["rgb_marker"])
-        right_tac = tactile_transform(observation["tactile"]["right_gsmini"]["rgb_marker"])
+        tactile_obs = observation["tactile"]
+        left_key = "left_gsmini" if "left_gsmini" in tactile_obs else "left_tactile"
+        right_key = "right_gsmini" if "right_gsmini" in tactile_obs else "right_tactile"
+        raw_left_tac = tactile_obs[left_key]["rgb_marker"]
+        raw_right_tac = tactile_obs[right_key]["rgb_marker"]
+        left_tac = tactile_transform(raw_left_tac)
+        right_tac = tactile_transform(raw_right_tac)
+        if os.environ.get("UNIVTAC_POLICY_DEBUG_LOG") == "1" and not getattr(self, "_obs_debug_printed", False):
+            def range_msg(name, tensor):
+                arr = tensor.detach() if hasattr(tensor, "detach") else tensor
+                return f"{name}_dtype={getattr(arr, 'dtype', type(arr))} {name}_min={float(arr.min()):.6f} {name}_max={float(arr.max()):.6f}"
+            parts = [
+                range_msg("raw_cam_high", raw_cam_high),
+                range_msg("raw_left_tac", raw_left_tac),
+                range_msg("raw_right_tac", raw_right_tac),
+                range_msg("cam_high", cam_high),
+                range_msg("left_tac", left_tac),
+                range_msg("right_tac", right_tac),
+            ]
+            if raw_cam_wrist is not None:
+                parts.append(range_msg("raw_cam_wrist", raw_cam_wrist))
+                parts.append(range_msg("cam_wrist", cam_wrist))
+            print("UNIVTAC_OBS_DEBUG " + " ".join(parts))
+            self._obs_debug_printed = True
         
         # Extract joint positions (8D: 7 arm + 1 gripper)
         qpos = observation["embodiment"]["joint"][:8]
@@ -98,6 +129,8 @@ class Policy(BasePolicy):
         }
         if self.camera_type == 'all':
             ret["cam_wrist"] = cam_wrist
+        elif "cam_wrist" in getattr(self.model, "camera_names", []):
+            ret["cam_wrist"] = cam_high
         return ret
 
     def eval(self, task, observation):
@@ -111,9 +144,23 @@ class Policy(BasePolicy):
         
         # Get action from ACT model (returns (1, 8) numpy array)
         obs = self.encode_obs(observation)
-        if self.model.t % 10 == 0:
+        if self.model.t % 10 == 0 and os.environ.get("UNIVTAC_DISABLE_POLICY_SNAPSHOTS") != "1":
             self.save(task.get_frame_shot(observation), task.take_action_cnt)
         action = self.model.get_action(obs).reshape(-1)
+        if os.environ.get("UNIVTAC_POLICY_DEBUG_LOG") == "1" and task.take_action_cnt % 25 == 0:
+            qpos_arr = np.asarray(obs["qpos"])
+            action_arr = np.asarray(action)
+            delta_arr = action_arr - qpos_arr
+            print(
+                "UNIVTAC_POLICY_DEBUG "
+                f"task={self.task_name} step={task.step_count} actions={task.take_action_cnt} "
+                f"qpos_min={qpos_arr.min():.6f} qpos_max={qpos_arr.max():.6f} "
+                f"action_min={action_arr.min():.6f} action_max={action_arr.max():.6f} "
+                f"delta_max_abs={np.max(np.abs(delta_arr)):.6f} "
+                f"qpos={np.array2string(qpos_arr, precision=5, separator=',', max_line_width=100000)} "
+                f"action={np.array2string(action_arr, precision=5, separator=',', max_line_width=100000)} "
+                f"delta={np.array2string(delta_arr, precision=5, separator=',', max_line_width=100000)}"
+            )
         action = torch.from_numpy(action).to(task.device).float()
         exec_succ, eval_succ = task.take_action(action, action_type='qpos')
 
